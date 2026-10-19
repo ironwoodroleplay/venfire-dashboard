@@ -1,0 +1,12 @@
+import 'server-only';
+import {Pool} from 'pg';import {cookies} from 'next/headers';import {SignJWT,jwtVerify} from 'jose';
+const secret=()=>{if(!process.env.SESSION_SECRET||process.env.SESSION_SECRET.length<32)throw Error('SESSION_SECRET must have at least 32 characters');return new TextEncoder().encode(process.env.SESSION_SECRET)};
+const globalDb=globalThis as unknown as {venfirePool?:Pool};
+export const db=globalDb.venfirePool??new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});if(process.env.NODE_ENV!=='production')globalDb.venfirePool=db;
+export const guildId=()=>{if(!process.env.GUILD_ID)throw Error('GUILD_ID missing');return process.env.GUILD_ID};
+export async function getSession(){const jar=await cookies();const token=jar.get('vf_session')?.value;if(!token)return null;try{const {payload}=await jwtVerify(token,secret());return {id:String(payload.sub),name:String(payload.name||'User')};}catch{return null;}}
+export async function signSession(id:string,name:string){return new SignJWT({name}).setProtectedHeader({alg:'HS256'}).setSubject(id).setIssuedAt().setExpirationTime('7d').sign(secret());}
+export async function requireAdmin(){const s=await getSession();if(!s)throw Error('Unauthorized');const g=await discord(`/guilds/${guildId()}`,true);const owner=String(g.owner_id)===s.id;if(owner)return s;const m=await discord(`/guilds/${guildId()}/members/${s.id}`,true);const roles:Array<string>=m.roles||[];const all=await discord(`/guilds/${guildId()}/roles`,true) as Array<{id:string;permissions:string}>;const admin=roles.some(id=>{const p=BigInt(all.find(r=>r.id===id)?.permissions||'0');return (p&BigInt(8))!==BigInt(0)||(p&BigInt(32))!==BigInt(0)});if(!admin)throw Error('Manage Server permission required');return s;}
+export async function discord(path:string,bot=false){const token=process.env.DISCORD_BOT_TOKEN;if(!bot||!token)throw Error('Discord bot token missing');const r=await fetch(`https://discord.com/api/v10${path}`,{headers:{Authorization:`Bot ${token}`},cache:'no-store'});if(!r.ok)throw Error(`Discord API ${r.status}: ${(await r.text()).slice(0,200)}`);return r.json();}
+export async function getSettings(){const r=await db.query('SELECT data FROM settings WHERE guild_id=$1',[guildId()]);return r.rows[0]?.data||{};}
+export async function audit(actor:string,action:string,detail:object={}){await db.query('INSERT INTO audit_logs(guild_id,actor_id,action,detail) VALUES($1,$2,$3,$4)',[guildId(),actor,action,JSON.stringify(detail)]);}
